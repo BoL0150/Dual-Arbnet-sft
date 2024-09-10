@@ -7,6 +7,7 @@ import random
 import math
 from model.rdn import make_rdn
 from model.resblock import ResBlock
+from model.fuse_block import TransformerBlock
 def make_model(args, parent=False):
     return DUALRef(args)
 
@@ -23,6 +24,20 @@ def patch_norm_2d(x, kernel_size=3):
     var = mean_sq - mean**2
     return (x-mean)/(var + 1e-6)
 
+class SFTLayer(nn.Module):
+    def __init__(self):
+        super(SFTLayer, self).__init__()
+        self.SFT_scale_conv0 = nn.Conv2d(64, 64, 1)
+        self.SFT_scale_conv1 = nn.Conv2d(64, 64, 1)
+        self.SFT_shift_conv0 = nn.Conv2d(64, 64, 1)
+        self.SFT_shift_conv1 = nn.Conv2d(64, 64, 1)
+
+    def forward(self, x):
+        # x[0]: fea; x[1]: cond
+        scale = self.SFT_scale_conv1(F.leaky_relu(self.SFT_scale_conv0(x[1]), 0.1, inplace=True))
+        shift = self.SFT_shift_conv1(F.leaky_relu(self.SFT_shift_conv0(x[1]), 0.1, inplace=True))
+        return x[0] * (scale + 1) + shift
+
 class ImplicitDecoder(nn.Module):
     def __init__(self, in_channels=64, hidden_dims=[64, 64, 64, 64, 64]):
         super().__init__()
@@ -33,6 +48,13 @@ class ImplicitDecoder(nn.Module):
 
         self.K = nn.ModuleList()
         self.Q = nn.ModuleList()
+        self.CondNet = nn.Sequential(
+            nn.Conv2d(4, 128, 1), nn.LeakyReLU(0.1, True), nn.Conv2d(128, 128, 1),
+            nn.LeakyReLU(0.1, True), nn.Conv2d(128, 128, 1), nn.LeakyReLU(0.1, True),
+            nn.Conv2d(128, 128, 1), nn.LeakyReLU(0.1, True), nn.Conv2d(128, 64, 1)
+        )
+        self.sft_layers = nn.Sequential(SFTLayer(), SFTLayer(), SFTLayer(), SFTLayer(), SFTLayer())
+
         for hidden_dim in hidden_dims:
             self.K.append(nn.Sequential(nn.Conv2d(last_dim_K, hidden_dim*2, 1),
                                         nn.ReLU(),
@@ -59,9 +81,10 @@ class ImplicitDecoder(nn.Module):
     def _make_pos_encoding(self, x, size): 
         B, C, H, W = x.shape
         H_up, W_up = size
-       
-        h_idx = -1 + 1/H + 2/H * torch.arange(H, device=x.device).float()
-        w_idx = -1 + 1/W + 2/W * torch.arange(W, device=x.device).float()
+        h_idx_arange = torch.arange(H, device=x.device).float()
+        h_idx = -1 + 1/H + 2/H * h_idx_arange
+        w_idx_arange = torch.arange(W, device=x.device).float()
+        w_idx = -1 + 1/W + 2/W * w_idx_arange
         in_grid = torch.stack(torch.meshgrid(h_idx, w_idx), dim=0)
 
         h_idx_up = -1 + 1/H_up + 2/H_up * torch.arange(H_up, device=x.device).float()
@@ -74,16 +97,23 @@ class ImplicitDecoder(nn.Module):
 
         return rel_grid.contiguous().detach()
 
-    def step(self, x, ref, syn_inp):
+    def step(self, x, ref, syn_inp, probability_map):
         q = syn_inp
         q_ref =syn_inp
         k = x
         k_ref = ref
         kk = torch.cat([k,k_ref],dim=1)
+
+        probability_map = F.interpolate(probability_map, [q.shape[2], q.shape[3]])
+        cond = self.CondNet(probability_map)
+
         for i in range(len(self.K)):
-            kk = self.K[i](kk)
+            kk = self.K[i](kk)  # 12, 128, 96, 96
             dim = kk.shape[1]//2
             q = kk[:,:dim]*self.Q[i](q)
+            res = self.sft_layers[i]((q, cond))
+            q = q + res
+            # q = self.sem[i](q, probability_map[i])
             q_ref = kk[:,dim:]*self.Q[i](q_ref)
         q = self.last_layer(q)
         q_ref = self.last_layer(q_ref)
@@ -103,7 +133,7 @@ class ImplicitDecoder(nn.Module):
         return pred
 
 
-    def forward(self, x, ref, size, bsize=None):
+    def forward(self, x, ref, size, probability_map, bsize=None):
         B, C, H_in, W_in = x.shape
         Bref, Cref, H_in_ref, W_in_ref = ref.shape
         rel_coord = (self._make_pos_encoding(x, size).expand(B, -1, *size))
@@ -113,8 +143,12 @@ class ImplicitDecoder(nn.Module):
         x = F.interpolate(F.unfold(x, 3, padding=1).view(B, C*9, H_in, W_in), size=syn_inp.shape[-2:], mode='bilinear')
         ref = F.interpolate(F.unfold(ref, 3, padding=1).view(B, C*9, H_in_ref, W_in_ref), size=syn_inp.shape[-2:], mode='bilinear')
         if bsize is None: 
-            pred = self.step(x, ref, syn_inp)
+            pred = self.step(x, ref, syn_inp, probability_map)
         else:
+            assert(False)
+            print("###################################################################")
+            print("###################################################################")
+            print("###################################################################")
             pred = self.batched_step(x, syn_inp, bsize)
         return pred
 
@@ -140,7 +174,8 @@ class DUALRef(nn.Module):
             ref_type = random.randint(1,2) 
             if epoch is not None and epoch < 10:
                 ref_type = 1
-        ref = inp[ref_type] 
+        ref = inp[ref_type]
+        probability_map = inp[5]
         inp = inp[0]
 
         B,C,H,W = inp.shape
@@ -152,6 +187,6 @@ class DUALRef(nn.Module):
             ref = self.encoder((ref-0.5)/0.5)
         ref.requires_grad = True
         size = [H_hr, W_hr]
-        pred,pred_ref = self.decoder(feat, ref, size, bsize)
+        pred,pred_ref = self.decoder(feat, ref, size, probability_map, bsize)
 
         return pred*0.5+0.5, pred_ref*0.5+0.5

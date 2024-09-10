@@ -9,6 +9,9 @@ from decimal import Decimal
 from tqdm import tqdm
 import torch.nn as nn
 import torch.nn.functional as F
+from datetime import datetime, timedelta
+import time
+from loss.seg_unet import SegUNet_F
 
 class DataConsistency(nn.Module):
     def __init__(self):
@@ -39,6 +42,9 @@ class Trainer():
         self.loss = my_loss
         self.optimizer = utility.make_optimizer(args, self.model)
         self.scheduler = utility.make_scheduler(args, self.optimizer)
+        self.stage_epoch = self.args.epochs / 2
+        self.SegUnet = SegUNet_F({'probability-map': [1]}, 'OASIS_lesion_only').to('cuda')
+        print(f"######## stage epoch :{self.stage_epoch}############")
 
         if self.args.load != '.':
             self.optimizer.load_state_dict(
@@ -51,10 +57,45 @@ class Trainer():
 
         self.DataConsistency = DataConsistency()
 
+    @staticmethod
+    def fancy_print(m):
+        l = len(m)
+        return '#' * (l + 50) + '\n' + '#' * 5 + ' ' * 20 + m + ' ' * 20 + '#' * 5 + '\n' + '#' * (l + 50)
+
+    def write_log(self, plog):
+        # if self.verbose:
+        #     print(plog)
+        # with open(self.training_log, 'a') as f:
+        #     f.write(plog + '\n')
+        print(plog)
+
+    @staticmethod
+    def current_time(mode='str'):
+        """
+        Return current system time.
+        :param mode:
+                str: return a string to print, current date and time;
+                float: return time.time(), for time cost
+        :return: a str or a float, depends on mode
+        """
+        if mode == 'str':
+            return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if mode == 'float':
+            return time.time()
+
     def train(self):
         self.scheduler.step()
         self.loss.step()
         epoch = self.scheduler.last_epoch + 1
+
+        self.stage2 = False
+
+        if epoch != 1 and epoch % self.stage_epoch == 1:
+            self.stage2 = True
+            plog = self.fancy_print(
+                'Training stage 2 start @ {}'.format(self.current_time())
+            )
+            self.write_log(plog)
 
         self.loss.start_log()
         self.model.train()
@@ -68,6 +109,10 @@ class Trainer():
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr
 
+            # plog = self.fancy_print(
+            #     'Training stage 1 start @ {}'.format(self.current_time())
+            # )
+            # self.write_log(plog)
         # train on all scale factors for remaining epochs
         else:
             self.loader_train.dataset.first_epoch = False
@@ -91,16 +136,19 @@ class Trainer():
 
             # inference
             self.model.get_model().set_scale(scale, scale2)
+            lr_real = lr[:,0:1,:,:]
+            _, _, decoder_feature = self.SegUnet(lr_real, None, None)
+
             if ref_hr is None:
                 sr = self.model(lr)
             else:
-                sr = self.model((lr, ref_hr, ref_lr, self.args.ref_type, epoch))
+                sr = self.model((lr, ref_hr, ref_lr, self.args.ref_type, epoch, decoder_feature))
             if isinstance(sr,tuple):
                 sr,Refsr = sr
             else:
                 Refsr = None
             # loss function
-            loss = self.loss(sr, Refsr, None, hr, ref_hr, lr.shape[2], lr.shape[3])
+            loss = self.loss(self.stage2, sr, Refsr, None, hr, ref_hr, lr.shape[2], lr.shape[3])
 
             # backward
             if loss.item() < self.args.skip_threshold * self.error_last:
@@ -178,10 +226,13 @@ class Trainer():
                     lr, hr, ref_hr, ref_lr = self.crop_border(lr, hr, ref_hr, ref_lr, scale, scale2)
                     # inference
                     self.model.get_model().set_scale(scale, scale2)
+                    lr_real = lr[:,0:1,:,:]
+                    _, _, decoder_feature = self.SegUnet(lr_real, None, None)
+
                     if ref_hr is None:
                         sr = self.model(lr)
                     else:
-                        sr = self.model((lr, ref_hr, ref_lr, self.args.ref_type_test))
+                        sr = self.model((lr, ref_hr, ref_lr, self.args.ref_type_test, 0, decoder_feature))
                     if isinstance(sr,tuple):
                         sr,Refsr = sr                    
 

@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from loss.seg_unet import SegUNet_F
 
 class Loss(nn.modules.loss._Loss):
     def __init__(self, args, ckp):
@@ -19,6 +20,7 @@ class Loss(nn.modules.loss._Loss):
         self.n_GPUs = args.n_GPUs
         self.loss = []
         self.loss_module = nn.ModuleList()
+        self.SegUnet = SegUNet_F({'encoder-L1': [1]}, 'OASIS_lesion_only').to('cuda')
         for loss in args.loss.split('+'):
             weight, loss_type = loss.split('*')
             if loss_type == 'MSE':
@@ -71,23 +73,37 @@ class Loss(nn.modules.loss._Loss):
 
         if args.load != '.': self.load(ckp.dir, cpu=args.cpu)
 
-    def forward(self, sr, refsr, FSsr, hr, refhr, shape1, shape2):
+    def forward(self, stage2:bool,  sr, refsr, FSsr, hr, refhr, shape1, shape2):
         losses = []
+        stage_weight = 1
+
+        if stage2 == True:
+            sr_real = sr[:,0:1,:,:]
+            hr_real = hr[:,0:1,:,:]
+            loss, _, probablility_maps = self.SegUnet(sr_real, hr_real, None)
+            assert(probablility_maps == None)
+
+            effective_loss = 1 * loss
+            losses.append(effective_loss)
+            self.log[-1, 0] += effective_loss.item()
+            stage_weight = 0.1
+        else :
+            self.log[-1, 0] += 0
+
         for i, l in enumerate(self.loss):
             if l['function'] is not None:
                 if l['type'] == 'L1':
                     loss = 1*l['function'](sr, hr)
-                    effective_loss = l['weight'] * loss
+                    effective_loss = l['weight'] * loss * stage_weight
                     losses.append(effective_loss)
-
-                    self.log[-1, i] += effective_loss.item()
+                    self.log[-1, i + 1] += effective_loss.item()
                 elif l['type'] == 'KLoss':
                     loss = l['function'](sr, FSsr, hr, shape1, shape2)
-                    effective_loss = l['weight'] * loss
+                    effective_loss = l['weight'] * loss * stage_weight
                     losses.append(effective_loss)
-                    self.log[-1, i] += effective_loss.item()
+                    self.log[-1, i + 1] += effective_loss.item()
             elif l['type'] == 'DIS':
-                self.log[-1, i] += self.loss[i - 1]['function'].loss
+                self.log[-1, i + 1] += self.loss[i - 1]['function'].loss
 
         loss_sum = sum(losses)
         if len(self.loss) > 1:

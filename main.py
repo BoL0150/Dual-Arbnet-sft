@@ -8,7 +8,7 @@ from trainer import Trainer
 import os
 from thop import profile
 from thop import clever_format
-
+os.environ['CUDA_VISIBLE_DEVICES'] = '4,5'
 if __name__ == '__main__':
     torch.manual_seed(args.seed)
     checkpoint = utility.checkpoint(args)       ## setting the log and the train information

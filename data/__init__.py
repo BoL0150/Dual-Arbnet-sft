@@ -1,7 +1,6 @@
 from importlib import import_module
 from data.dataloader import MSDataLoader
 
-
 class Data:
     def __init__(self, args):
         self.loader_train = None
@@ -26,7 +25,7 @@ class Data:
         self.loader_test = MSDataLoader(
             args,
             testset,
-            batch_size=1,
+            batch_size=16,
             shuffle=False,
             pin_memory=not args.cpu
         )

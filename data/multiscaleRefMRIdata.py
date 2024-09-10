@@ -170,7 +170,7 @@ class RefMRIData(data.Dataset):
         with open(ref_file, 'r') as f:
             for line in f.readlines():
                 line = line.strip('\n')
-                lr, ref = line.split(' ')
+                lr, ref = line.split('\t')
                 self.dictref[lr] = os.path.join(dir_ref,ref+'.mat')        
 
     def _name_hrbin(self):
@@ -217,6 +217,7 @@ class RefMRIData(data.Dataset):
         lr_tensor, hr_tensor, ref_hr_tensor = common.np2Tensor(
             lr, hr, ref_hr, rgb_range=1
         )
+        #         lr                    ref_hr      ref_lr               hr
         return (lr_tensor[:2,:,:], ref_hr_tensor, lr_tensor[2:,:,:]), hr_tensor, filename
 
     def __len__(self):
@@ -234,12 +235,12 @@ class RefMRIData(data.Dataset):
     def _load_file(self, idx):
         idx = self._get_index(idx)
         f_hr = self.images_hr[idx]
-        hr = sio.loadmat(f_hr)['dcm']
+        hr = sio.loadmat(f_hr)['img']
         
         filename, _ = os.path.splitext(os.path.basename(f_hr))
         filename_withoutdcm = filename.split('.')[0]
         f_ref = self.dictref[filename_withoutdcm]
-        refimg = sio.loadmat(f_ref)['dcm']
+        refimg = sio.loadmat(f_ref)['img']
         hr , lr, ref_hr, ref_lr = paired_crop(hr, refimg, (self.scale[self.idx_scale],self.scale2[self.idx_scale]))
         return lr, hr, ref_hr, ref_lr, filename
 

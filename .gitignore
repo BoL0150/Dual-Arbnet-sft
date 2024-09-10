@@ -1,0 +1,4 @@
+demodata/mattest/
+demodata/ref_mat/
+demodata/val_mattest/
+*.pt
